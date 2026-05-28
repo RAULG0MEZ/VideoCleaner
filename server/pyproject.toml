@@ -1,0 +1,27 @@
+[project]
+name = "auto-video-cleaner-server"
+version = "0.1.0"
+description = "FastAPI backend for automatic spoken-video cleanup."
+requires-python = ">=3.9"
+dependencies = [
+  "fastapi>=0.115.0",
+  "python-multipart>=0.0.18",
+  "uvicorn[standard]>=0.32.0"
+]
+
+[project.optional-dependencies]
+ai = [
+  "faster-whisper>=1.1.0"
+]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"

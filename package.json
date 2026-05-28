@@ -1,0 +1,82 @@
+{
+  "name": "auto-video-cleaner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:client\" \"npm run dev:server\"",
+    "dev:client": "npm --prefix client run dev",
+    "dev:server": "cd server && .venv/bin/python -m uvicorn app.main:app --reload --reload-dir app --host 0.0.0.0 --port 8000",
+    "dev:native": "concurrently -k \"npm --prefix client run dev\" \"wait-on http://127.0.0.1:5173 && electron . --dev\"",
+    "build": "npm run build:client && npm run build:server && npm run prepare:native-assets",
+    "build:client": "npm --prefix client run build",
+    "build:server": "node scripts/build-python-server.mjs",
+    "prepare:native-assets": "node scripts/prepare-native-assets.mjs",
+    "typecheck": "npm --prefix client run typecheck",
+    "dist": "npm run build && electron-builder",
+    "dist:mac": "node scripts/assert-platform.mjs darwin macOS && npm run build && electron-builder --mac",
+    "dist:win": "node scripts/assert-platform.mjs win32 Windows && npm run build && electron-builder --win"
+  },
+  "build": {
+    "appId": "com.raulgomez.autovideocleaner",
+    "productName": "Auto Video Cleaner",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "client/dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "server/dist",
+        "to": "server",
+        "filter": [
+          "auto-video-cleaner-server*"
+        ]
+      },
+      {
+        "from": "native/bin",
+        "to": "bin",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.video",
+      "identity": null,
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "devDependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@ffprobe-installer/ffprobe": "^2.1.2",
+    "concurrently": "^9.1.2",
+    "electron": "^41.7.1",
+    "electron-builder": "^26.8.1",
+    "wait-on": "^9.0.10"
+  }
+}

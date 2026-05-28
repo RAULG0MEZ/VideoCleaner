@@ -1,0 +1,130 @@
+name: Build installable apps
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    name: Build macOS DMG
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Node dependencies
+        run: |
+          npm ci
+          npm --prefix client ci
+
+      - name: Install Python backend dependencies
+        run: |
+          python -m venv server/.venv
+          server/.venv/bin/python -m pip install --upgrade pip
+          cd server
+          .venv/bin/python -m pip install -e ".[ai]" pytest
+
+      - name: Run checks
+        run: |
+          npm run typecheck
+          server/.venv/bin/python -m pytest server/tests
+
+      - name: Build macOS installer
+        run: npm run dist:mac
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          arch="$(uname -m)"
+          if [ "$arch" = "arm64" ]; then app_arch="arm64"; else app_arch="x64"; fi
+          cp release/*.dmg "release-assets/Auto-Video-Cleaner-mac-${app_arch}.dmg"
+          cp release/*mac.zip "release-assets/Auto-Video-Cleaner-mac-${app_arch}.zip"
+
+      - name: Upload installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-installers
+          path: release-assets/*
+
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+
+  windows:
+    name: Build Windows installer
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Node dependencies
+        shell: pwsh
+        run: |
+          npm ci
+          npm --prefix client ci
+
+      - name: Install Python backend dependencies
+        shell: pwsh
+        run: |
+          python -m venv server\.venv
+          server\.venv\Scripts\python -m pip install --upgrade pip
+          Set-Location server
+          .venv\Scripts\python -m pip install -e ".[ai]" pytest
+
+      - name: Run checks
+        shell: pwsh
+        run: |
+          npm run typecheck
+          server\.venv\Scripts\python -m pytest server\tests
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: npm run dist:win
+
+      - name: Prepare release assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          $installer = Get-ChildItem release -Filter "*.exe" | Select-Object -First 1
+          Copy-Item $installer.FullName "release-assets\Auto-Video-Cleaner-windows-x64.exe"
+
+      - name: Upload installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: release-assets/*
+
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*

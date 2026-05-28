@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Auto Video Cleaner</title>
+    <meta
+      name="description"
+      content="Descarga Auto Video Cleaner para limpiar pausas, silencios y muletillas de videos hablados en tu computadora."
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">App nativa para editar video</p>
+          <h1>Auto Video Cleaner</h1>
+          <p class="summary">
+            Limpia videos hablados en local: detecta pausas largas, genera preview y exporta MP4 o MOV sin depender del
+            navegador.
+          </p>
+          <div class="download-actions">
+            <a
+              class="download-button primary"
+              id="mac-download"
+              href="https://github.com/RAULG0MEZ/VideoCleaner/releases/latest"
+            >
+              Descargar para Mac
+            </a>
+            <a
+              class="download-button"
+              id="windows-download"
+              href="https://github.com/RAULG0MEZ/VideoCleaner/releases/latest"
+            >
+              Descargar para Windows
+            </a>
+          </div>
+          <p class="release-note" id="release-note">Buscando el release mas reciente...</p>
+        </div>
+        <div class="app-preview" aria-label="Vista previa de la app">
+          <div class="window-bar">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <div class="preview-grid">
+            <div class="video-pane">
+              <span>Antes</span>
+              <strong>00:42.8</strong>
+            </div>
+            <div class="video-pane is-clean">
+              <span>Despues</span>
+              <strong>00:31.4</strong>
+            </div>
+          </div>
+          <div class="timeline">
+            <span class="clip wide"></span>
+            <span class="gap"></span>
+            <span class="clip"></span>
+            <span class="gap short"></span>
+            <span class="clip medium"></span>
+          </div>
+        </div>
+      </section>
+
+      <section class="features" aria-label="Funciones">
+        <article>
+          <h2>Instalable</h2>
+          <p>DMG para macOS e instalador EXE para Windows generados desde GitHub Releases.</p>
+        </article>
+        <article>
+          <h2>Local</h2>
+          <p>El procesamiento corre en tu compu con backend Python y FFmpeg incluidos en la app.</p>
+        </article>
+        <article>
+          <h2>Simple</h2>
+          <p>Subes el video, ajustas la limpieza, revisas el resultado y exportas.</p>
+        </article>
+      </section>
+    </main>
+
+    <script>
+      const releaseNote = document.querySelector("#release-note");
+      const macButton = document.querySelector("#mac-download");
+      const windowsButton = document.querySelector("#windows-download");
+
+      fetch("https://api.github.com/repos/RAULG0MEZ/VideoCleaner/releases/latest")
+        .then((response) => {
+          if (!response.ok) throw new Error("No release yet");
+          return response.json();
+        })
+        .then((release) => {
+          const assets = Array.isArray(release.assets) ? release.assets : [];
+          const macAsset = assets.find((asset) => /mac.*\.dmg$/i.test(asset.name));
+          const windowsAsset = assets.find((asset) => /(windows|win).*\.exe$/i.test(asset.name));
+
+          if (macAsset) macButton.href = macAsset.browser_download_url;
+          if (windowsAsset) windowsButton.href = windowsAsset.browser_download_url;
+
+          releaseNote.textContent = `Ultima version: ${release.tag_name}.`;
+        })
+        .catch(() => {
+          releaseNote.textContent = "Los descargables apareceran aqui cuando se publique el primer release.";
+        });
+    </script>
+  </body>
+</html>

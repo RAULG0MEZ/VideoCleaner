@@ -1,0 +1,16 @@
+node_modules/
+dist/
+release/
+native/bin/*
+server/build/
+server/dist/
+.pytest_cache/
+*.tsbuildinfo
+.DS_Store
+.env
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+server/data/jobs/*
+!server/data/jobs/.gitkeep
