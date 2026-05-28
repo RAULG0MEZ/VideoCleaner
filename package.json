@@ -15,8 +15,8 @@
     "prepare:native-assets": "node scripts/prepare-native-assets.mjs",
     "typecheck": "npm --prefix client run typecheck",
     "dist": "npm run build && electron-builder",
-    "dist:mac": "node scripts/assert-platform.mjs darwin macOS && npm run build && electron-builder --mac",
-    "dist:win": "node scripts/assert-platform.mjs win32 Windows && npm run build && electron-builder --win"
+    "dist:mac": "node scripts/assert-platform.mjs darwin macOS && npm run build && electron-builder --mac --publish never",
+    "dist:win": "node scripts/assert-platform.mjs win32 Windows && npm run build && electron-builder --win --publish never"
   },
   "build": {
     "appId": "com.raulgomez.autovideocleaner",
