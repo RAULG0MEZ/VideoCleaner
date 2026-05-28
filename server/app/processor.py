@@ -27,6 +27,7 @@ def process_video(
     work_dir: Path,
     settings: CleanerSettings,
     progress: ProgressCallback,
+    text_cuts: Optional[list[CutSegment]] = None,
 ) -> tuple[float, float, list[CutSegment], list[str], Path]:
     require_ffmpeg()
     progress(0.08, "Inspeccionando video")
@@ -52,8 +53,14 @@ def process_video(
         transcript_result = transcribe_dialogue(input_path, work_dir, settings)
         ai_notes = transcript_result.notes
 
-    cuts = merge_cuts([*silence_cuts, *ai_cuts], duration)
-    _write_cuts(work_dir / BASE_CUTS_FILENAME, cuts)
+    base_cuts = merge_cuts([*silence_cuts, *ai_cuts], duration)
+    cuts = base_cuts
+    if text_cuts is not None:
+        text_cuts = merge_cuts(text_cuts, duration, gap=0.02)
+        cuts = merge_cuts([*base_cuts, *text_cuts], duration)
+        _write_cuts(work_dir / TEXT_CUTS_FILENAME, text_cuts)
+
+    _write_cuts(work_dir / BASE_CUTS_FILENAME, base_cuts)
     _write_cuts(work_dir / CUTS_FILENAME, cuts)
 
     progress(0.58, "Renderizando version corregida")

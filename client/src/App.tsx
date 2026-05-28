@@ -1,17 +1,30 @@
 import {
   CheckCircle2,
   Download,
+  FileText,
   FileVideo,
   LoaderCircle,
+  Redo2,
   RotateCcw,
   Scissors,
   SlidersHorizontal,
+  Trash2,
+  Undo2,
   UploadCloud,
   WandSparkles,
   X,
   XCircle
 } from "lucide-react";
-import { ChangeEvent, DragEvent, useEffect, useId, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  type ChangeEvent,
+  type DragEvent,
+  type KeyboardEvent,
+  useEffect,
+  useId,
+  useRef,
+  useState
+} from "react";
 
 type JobStatus = "uploaded" | "queued" | "analyzing" | "rendering" | "completed" | "failed";
 
@@ -54,6 +67,46 @@ type Health = {
   dialogue_cleanup: boolean;
 };
 
+type TranscriptWord = {
+  text: string;
+  normalized: string;
+  start: number;
+  end: number;
+};
+
+type Transcript = {
+  available: boolean;
+  language?: string;
+  duration?: number;
+  notes?: string[];
+  words: TranscriptWord[];
+  text_cuts?: CutSegment[];
+};
+
+type SelectionRange = {
+  anchor: number;
+  focus: number;
+};
+
+type PlaybackSource = "before" | "after";
+
+type TranscriptPlayback = {
+  source: PlaybackSource | null;
+  originalTime: number;
+  isPlaying: boolean;
+};
+
+type TranscriptBlock = {
+  id: string;
+  start: number;
+  end: number;
+  gapBefore: number;
+  words: Array<{
+    word: TranscriptWord;
+    index: number;
+  }>;
+};
+
 type CleanupMode = {
   id: "soft" | "balanced" | "strong";
   label: string;
@@ -68,7 +121,7 @@ const initialSettings: Settings = {
   silenceThresholdDb: -35,
   minSilenceSec: 0.45,
   keepSilenceSec: 0.12,
-  enableTranscription: false,
+  enableTranscription: true,
   enableAiCleanup: false
 };
 
@@ -109,6 +162,20 @@ export function App() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [localSourceUrl, setLocalSourceUrl] = useState<string | null>(null);
+  const [transcript, setTranscript] = useState<Transcript | null>(null);
+  const [transcriptJobId, setTranscriptJobId] = useState<string | null>(null);
+  const [isTranscriptLoading, setIsTranscriptLoading] = useState(false);
+  const [transcriptError, setTranscriptError] = useState<string | null>(null);
+  const [textCutHistory, setTextCutHistory] = useState<CutSegment[][]>([[]]);
+  const [textCutHistoryIndex, setTextCutHistoryIndex] = useState(0);
+  const [appliedTextCuts, setAppliedTextCuts] = useState<CutSegment[]>([]);
+  const [selectedTranscriptRange, setSelectedTranscriptRange] = useState<SelectionRange | null>(null);
+  const [isSelectingTranscript, setIsSelectingTranscript] = useState(false);
+  const [transcriptPlayback, setTranscriptPlayback] = useState<TranscriptPlayback>({
+    source: null,
+    originalTime: 0,
+    isPlaying: false
+  });
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("mp4");
   const [isExporting, setIsExporting] = useState(false);
@@ -120,18 +187,18 @@ export function App() {
   const isBusy = isUploading || isProcessing;
   const activeCleanupMode = getCleanupMode(settings);
   const progressValue = Math.round((job?.progress ?? (isUploading ? 0.04 : 0)) * 100);
+  const manualTextCuts = textCutHistory[textCutHistoryIndex] ?? [];
+  const hasPendingTextCuts = !areCutListsEqual(manualTextCuts, appliedTextCuts);
   const canProcess = Boolean(job && !isBusy);
-  const canExport = job?.status === "completed";
+  const canExport = job?.status === "completed" && !hasPendingTextCuts;
   const beforeVideoUrl = job?.source_url ? apiUrl(job.source_url) : localSourceUrl;
   const afterVideoUrl = job?.status === "completed" && job.preview_url ? apiUrl(job.preview_url) : undefined;
   const exportProgressPercent = Math.round(exportProgress * 100);
   const showExportProgress = isExporting || exportProgress > 0 || Boolean(exportError);
   const isExportProgressIndeterminate = isExporting && exportProgress <= 0.08;
-  const cleanedDuration = job?.cleaned_duration ?? 0;
-  const originalDuration = job?.duration ?? 0;
-  const removedDuration =
-    originalDuration > 0 && cleanedDuration > 0 ? Math.max(0, originalDuration - cleanedDuration) : undefined;
   const hasStatusPanel = Boolean(uploadError || job?.error) || isProcessing || job?.status === "failed";
+  const canUndoTextEdit = textCutHistoryIndex > 0;
+  const canRedoTextEdit = textCutHistoryIndex < textCutHistory.length - 1;
   const runButtonCopy =
     job?.status === "completed"
       ? "Reprocesar con estos ajustes"
@@ -153,6 +220,66 @@ export function App() {
   }, [job]);
 
   useEffect(() => {
+    if (!job || !settings.enableTranscription || transcriptJobId === job.id) return;
+    let isCurrent = true;
+    let retryTimer: number | undefined;
+    let didRequestTranscription = false;
+    setIsTranscriptLoading(true);
+    setTranscriptError(null);
+
+    async function loadTranscript() {
+      try {
+        const payload = await fetchTranscript(job!.id);
+        if (!isCurrent) return;
+        const textCuts = payload.text_cuts ?? [];
+        setTranscript(payload);
+        setTranscriptJobId(job!.id);
+        setTextCutHistory([textCuts]);
+        setTextCutHistoryIndex(0);
+        setAppliedTextCuts(textCuts);
+        setSelectedTranscriptRange(null);
+        setIsTranscriptLoading(false);
+      } catch (error) {
+        if (!isCurrent) return;
+        const canStartTranscription = job!.status === "uploaded" || job!.status === "completed" || job!.status === "failed";
+
+        if (!didRequestTranscription && canStartTranscription) {
+          didRequestTranscription = true;
+          try {
+            await startTranscript(job!.id);
+          } catch (startError) {
+            if (!isCurrent) return;
+            setTranscript(null);
+            setTranscriptError(startError instanceof Error ? startError.message : "No pude iniciar la transcripcion.");
+            setIsTranscriptLoading(false);
+            return;
+          }
+        }
+
+        if (didRequestTranscription || activeStatuses.includes(job!.status)) {
+          retryTimer = window.setTimeout(loadTranscript, 1200);
+          return;
+        }
+
+        setTranscript(null);
+        setTextCutHistory([[]]);
+        setTextCutHistoryIndex(0);
+        setAppliedTextCuts([]);
+        setSelectedTranscriptRange(null);
+        setTranscriptError(error instanceof Error ? error.message : "No pude cargar la transcripcion.");
+        setIsTranscriptLoading(false);
+      }
+    }
+
+    void loadTranscript();
+
+    return () => {
+      isCurrent = false;
+      if (retryTimer) window.clearTimeout(retryTimer);
+    };
+  }, [job?.id, job?.status, settings.enableTranscription, transcriptJobId]);
+
+  useEffect(() => {
     fetch(apiUrl("/api/health"))
       .then((response) => parseResponse<Health>(response))
       .then(setHealth)
@@ -171,6 +298,17 @@ export function App() {
   }, [file]);
 
   useEffect(() => {
+    if (!isSelectingTranscript) return;
+    const stopSelecting = () => setIsSelectingTranscript(false);
+    window.addEventListener("pointerup", stopSelecting);
+    window.addEventListener("pointercancel", stopSelecting);
+    return () => {
+      window.removeEventListener("pointerup", stopSelecting);
+      window.removeEventListener("pointercancel", stopSelecting);
+    };
+  }, [isSelectingTranscript]);
+
+  useEffect(() => {
     if (!canExport) setIsExportModalOpen(false);
   }, [canExport]);
 
@@ -178,6 +316,7 @@ export function App() {
     setFile(nextFile);
     setJob(null);
     setUploadError(null);
+    resetTranscriptState();
     setIsExportModalOpen(false);
     setIsExporting(false);
     setExportProgress(0);
@@ -212,7 +351,11 @@ export function App() {
       formData.append("crf", String(maxQualityCrf));
       formData.append("enable_transcription", String(settings.enableTranscription));
       formData.append("enable_ai_cleanup", String(settings.enableAiCleanup));
+      if (transcriptJobId === job.id) {
+        formData.append("text_cuts", JSON.stringify(toEditableCutPayload(manualTextCuts)));
+      }
 
+      resetTranscriptState();
       const response = await fetch(apiUrl(`/api/jobs/${job.id}/process`), {
         method: "POST",
         body: formData
@@ -241,6 +384,7 @@ export function App() {
     setFile(null);
     setJob(null);
     setUploadError(null);
+    resetTranscriptState();
     setIsExportModalOpen(false);
     setIsExporting(false);
     setExportProgress(0);
@@ -250,6 +394,32 @@ export function App() {
 
   function applyCleanupMode(mode: CleanupMode) {
     setSettings((current) => ({ ...current, ...mode.settings }));
+  }
+
+  function resetTranscriptState() {
+    setTranscript(null);
+    setTranscriptJobId(null);
+    setIsTranscriptLoading(false);
+    setTranscriptError(null);
+    setTextCutHistory([[]]);
+    setTextCutHistoryIndex(0);
+    setAppliedTextCuts([]);
+    setSelectedTranscriptRange(null);
+    setIsSelectingTranscript(false);
+    setTranscriptPlayback({ source: null, originalTime: 0, isPlaying: false });
+  }
+
+  function handleVideoPlayback(source: PlaybackSource, currentTime: number, isPlaying: boolean) {
+    const originalTime =
+      source === "after"
+        ? mapRenderedTimeToOriginal(currentTime, job?.cuts ?? [], job?.duration ?? transcript?.duration)
+        : Math.max(0, currentTime);
+
+    setTranscriptPlayback({
+      source,
+      originalTime,
+      isPlaying
+    });
   }
 
   function openExportModal() {
@@ -308,6 +478,87 @@ export function App() {
     request.send();
   }
 
+  function startTranscriptSelection(index: number) {
+    if (isBusy || isWordDeleted(transcript?.words[index], manualTextCuts)) return;
+    setSelectedTranscriptRange({ anchor: index, focus: index });
+    setIsSelectingTranscript(true);
+  }
+
+  function extendTranscriptSelection(index: number) {
+    if (!isSelectingTranscript || isBusy) return;
+    setSelectedTranscriptRange((current) => (current ? { ...current, focus: index } : { anchor: index, focus: index }));
+  }
+
+  function clearTranscriptSelection() {
+    setSelectedTranscriptRange(null);
+    setIsSelectingTranscript(false);
+  }
+
+  function deleteSelectedTranscript() {
+    if (!transcript || !selectedTranscriptRange || isBusy) return;
+    const [startIndex, endIndex] = normalizeRange(selectedTranscriptRange);
+    const selectedWords = transcript.words
+      .slice(startIndex, endIndex + 1)
+      .filter((word) => !isWordDeleted(word, manualTextCuts));
+    if (!selectedWords.length) return;
+
+    const firstWord = selectedWords[0];
+    const lastWord = selectedWords[selectedWords.length - 1];
+    const selectedText = selectedWords.map((word) => word.text).join(" ").replace(/\s+/g, " ").trim();
+    const start = Math.max(0, firstWord.start - 0.04);
+    const end = lastWord.end + 0.04;
+    commitTextCuts([
+      ...manualTextCuts,
+      {
+        start,
+        end,
+        duration: Math.max(0, end - start),
+        reason: `Texto eliminado: ${selectedText.slice(0, 120)}`
+      }
+    ]);
+  }
+
+  function undoTextEdit() {
+    if (!canUndoTextEdit || isBusy) return;
+    setTextCutHistoryIndex((current) => Math.max(0, current - 1));
+    clearTranscriptSelection();
+  }
+
+  function redoTextEdit() {
+    if (!canRedoTextEdit || isBusy) return;
+    setTextCutHistoryIndex((current) => Math.min(textCutHistory.length - 1, current + 1));
+    clearTranscriptSelection();
+  }
+
+  function commitTextCuts(nextCuts: CutSegment[]) {
+    const nextHistory = [...textCutHistory.slice(0, textCutHistoryIndex + 1), nextCuts];
+    setTextCutHistory(nextHistory);
+    setTextCutHistoryIndex(nextHistory.length - 1);
+    clearTranscriptSelection();
+  }
+
+  async function applyPendingTextCuts() {
+    if (!job || !hasPendingTextCuts || isBusy) return;
+    setUploadError(null);
+
+    try {
+      const response = await fetch(apiUrl(`/api/jobs/${job.id}/text-edits`), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          cuts: toEditableCutPayload(manualTextCuts)
+        })
+      });
+      const payload = await parseResponse<Job>(response);
+      setAppliedTextCuts(manualTextCuts);
+      setJob(payload);
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : "No pude aplicar los cortes por texto.");
+    }
+  }
+
   if (!job) {
     return (
       <main
@@ -319,8 +570,6 @@ export function App() {
         onDragLeave={() => setIsDragging(false)}
         onDrop={handleDrop}
       >
-        <p className="eyebrow">Limpiador de video</p>
-        <h1>Auto Video Cleaner</h1>
         <input
           ref={inputRef}
           className="file-input"
@@ -329,15 +578,27 @@ export function App() {
           onChange={handleFileChange}
           disabled={isUploading}
         />
-        <button
-          className="empty-upload-button"
-          type="button"
-          onClick={() => inputRef.current?.click()}
-          disabled={isUploading}
+        <div
+          className={`empty-dropzone ${isDragging ? "is-dragging" : ""} ${isUploading ? "is-busy" : ""}`}
+          role="button"
+          tabIndex={0}
+          onClick={() => {
+            if (!isUploading) inputRef.current?.click();
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            if (!isUploading) inputRef.current?.click();
+          }}
         >
-          {isUploading ? <LoaderCircle className="spin" size={22} /> : <UploadCloud size={22} />}
-          {isUploading ? "Subiendo video..." : "Subir video"}
-        </button>
+          <AppBrand centered />
+          <div className="drop-copy">
+            <strong>{isUploading ? "Subiendo video..." : "Arrastra tu video aqui"}</strong>
+            <span>o haz click para subirlo manualmente</span>
+          </div>
+          <span className="manual-upload-pill">{isUploading ? "Importando" : "Elegir archivo"}</span>
+          <small>MP4, MOV, M4V, MKV o WEBM</small>
+        </div>
         {isUploading && (
           <div className="empty-progress" aria-label="Importando video">
             <div className="progress-track is-indeterminate">
@@ -353,10 +614,7 @@ export function App() {
   return (
     <main className="app-shell">
       <section className="topbar">
-        <div>
-          <p className="eyebrow">Limpiador de video</p>
-          <h1>Auto Video Cleaner</h1>
-        </div>
+        <AppBrand />
         <div className="topbar-actions">
           <button
             className="export-trigger"
@@ -384,21 +642,25 @@ export function App() {
           title="Antes"
           src={beforeVideoUrl}
           emptyText={isUploading ? "Subiendo video" : "Sube un video para verlo aqui"}
+          playbackSource="before"
+          onPlaybackChange={handleVideoPlayback}
         />
         <VideoPanel
           title="Despues"
           src={afterVideoUrl}
           emptyText={isBusy ? "Procesando limpieza" : "Ejecuta limpieza para ver resultado"}
+          playbackSource="after"
+          onPlaybackChange={handleVideoPlayback}
         />
       </section>
 
       <section className="editor-workspace">
         <div className="tool-column">
           <div
-            className={`dropzone ${isDragging ? "is-dragging" : ""} ${isBusy ? "is-busy" : ""}`}
+            className={`dropzone ${file ? "has-file" : ""} ${isDragging ? "is-dragging" : ""} ${isBusy ? "is-busy" : ""}`}
             onDragOver={(event) => {
               event.preventDefault();
-              setIsDragging(true);
+              if (!isBusy) setIsDragging(true);
             }}
             onDragLeave={() => setIsDragging(false)}
             onDrop={handleDrop}
@@ -408,7 +670,9 @@ export function App() {
               if (!isBusy) inputRef.current?.click();
             }}
             onKeyDown={(event) => {
-              if (!isBusy && (event.key === "Enter" || event.key === " ")) inputRef.current?.click();
+              if (event.key !== "Enter" && event.key !== " ") return;
+              event.preventDefault();
+              if (!isBusy) inputRef.current?.click();
             }}
           >
             <input
@@ -422,10 +686,11 @@ export function App() {
             <div className="drop-icon">
               {isBusy ? <LoaderCircle className="spin" size={28} /> : <UploadCloud size={30} />}
             </div>
-            <div>
-              <strong>{file ? file.name : "Sube o cambia el video"}</strong>
-              <span>Arrastra aqui o haz click</span>
+            <div className="drop-copy">
+              <strong>{file ? file.name : "Arrastra tu video aqui"}</strong>
+              <span>{file ? "Arrastra otro video o elige uno manualmente" : "o haz click para subirlo manualmente"}</span>
             </div>
+            <span className="manual-upload-pill">{file ? "Cambiar video" : "Elegir archivo"}</span>
           </div>
 
           <div className="panel controls-panel">
@@ -458,12 +723,36 @@ export function App() {
             <label className="toggle-card">
               <input
                 type="checkbox"
+                checked={settings.enableTranscription}
+                onChange={(event) =>
+                  setSettings((current) => ({
+                    ...current,
+                    enableTranscription: event.target.checked
+                  }))
+                }
+                disabled={isBusy || settings.enableAiCleanup}
+              />
+              <span>
+                <span className="toggle-title">
+                  <FileText size={16} />
+                  Transcripcion
+                </span>
+                <small>Muestra lo dicho con timestamps.</small>
+              </span>
+            </label>
+            {settings.enableTranscription && health?.dialogue_cleanup === false && (
+              <p className="ai-warning">Whisper no esta instalado en este entorno.</p>
+            )}
+
+            <label className="toggle-card">
+              <input
+                type="checkbox"
                 checked={settings.enableAiCleanup}
                 onChange={(event) =>
                   setSettings((current) => ({
                     ...current,
                     enableAiCleanup: event.target.checked,
-                    enableTranscription: event.target.checked
+                    enableTranscription: event.target.checked ? true : current.enableTranscription
                   }))
                 }
                 disabled={isBusy}
@@ -476,10 +765,6 @@ export function App() {
                 <small>Opcional, tarda mas.</small>
               </span>
             </label>
-            {settings.enableAiCleanup && health?.dialogue_cleanup === false && (
-              <p className="ai-warning">Whisper no esta instalado en este entorno.</p>
-            )}
-
             <details className="advanced-settings">
               <summary>
                 <SlidersHorizontal size={16} />
@@ -564,47 +849,32 @@ export function App() {
             </div>
           )}
 
-          <div className="metrics-panel">
-            <div className="metric">
-              <span>Original</span>
-              <strong>{formatSeconds(originalDuration)}</strong>
-            </div>
-            <div className="metric">
-              <span>Final</span>
-              <strong>{formatSeconds(cleanedDuration || undefined)}</strong>
-            </div>
-            <div className="metric">
-              <span>Recortado</span>
-              <strong>{formatSeconds(removedDuration)}</strong>
-            </div>
-            <div className="metric">
-              <span>Cortes</span>
-              <strong>{job.cuts.length}</strong>
-            </div>
-          </div>
-
-          <div className="cut-list">
-            <div className="panel-title">
-              <Scissors size={17} />
-              <h2>Cortes detectados</h2>
-            </div>
-            {job.cuts.length ? (
-              <ol>
-                {job.cuts.slice(0, 16).map((cut, index) => (
-                  <li key={`${cut.start}-${cut.end}-${index}`}>
-                    <span>{cut.reason || "Silencio detectado"}</span>
-                    <time>
-                      {formatSeconds(cut.start)} - {formatSeconds(cut.end)}
-                    </time>
-                  </li>
-                ))}
-              </ol>
-            ) : (
-              <p className="muted">
-                {job.status === "completed" ? "No se detectaron silencios para cortar." : "Pendiente de procesar."}
-              </p>
-            )}
-          </div>
+          {settings.enableTranscription && (
+            <TranscriptPanel
+              transcript={transcript}
+              isLoading={isTranscriptLoading || (isProcessing && settings.enableTranscription)}
+              error={transcriptError}
+              jobStatus={job.status}
+              health={health}
+              selectedRange={selectedTranscriptRange}
+              manualCuts={manualTextCuts}
+              playbackTime={transcriptPlayback.source ? transcriptPlayback.originalTime : null}
+              playbackSource={transcriptPlayback.source}
+              isPlaybackActive={transcriptPlayback.source !== null}
+              isPlaybackRunning={transcriptPlayback.isPlaying}
+              hasPendingCuts={hasPendingTextCuts}
+              canUndo={canUndoTextEdit}
+              canRedo={canRedoTextEdit}
+              isBusy={isBusy}
+              onWordPointerDown={startTranscriptSelection}
+              onWordPointerEnter={extendTranscriptSelection}
+              onClearSelection={clearTranscriptSelection}
+              onDeleteSelected={deleteSelectedTranscript}
+              onApplyCuts={() => void applyPendingTextCuts()}
+              onUndo={undoTextEdit}
+              onRedo={redoTextEdit}
+            />
+          )}
 
           {job.ai_notes?.map((note) => (
             <p className="ai-note" key={note}>
@@ -656,15 +926,6 @@ export function App() {
               </div>
             </div>
 
-            <div className="export-summary">
-              <span>Duracion final</span>
-              <strong>{formatSeconds(job.cleaned_duration)}</strong>
-              <span>Cortes aplicados</span>
-              <strong>{job.cuts.length}</strong>
-              <span>Salida</span>
-              <strong>Maxima</strong>
-            </div>
-
             {showExportProgress && (
               <div className="modal-progress" aria-label="Progreso de exportacion">
                 <div className={`progress-track ${isExportProgressIndeterminate ? "is-indeterminate" : ""}`}>
@@ -699,7 +960,288 @@ export function App() {
   );
 }
 
-function VideoPanel({ title, src, emptyText }: { title: string; src?: string | null; emptyText: string }) {
+function AppBrand({ centered = false }: { centered?: boolean }) {
+  return (
+    <div className={`app-brand ${centered ? "is-centered" : ""}`}>
+      <span className="app-logo" aria-hidden="true">
+        <img src="/app-icon.svg?v=mic-clean-v3" alt="" />
+      </span>
+      <div>
+        <p className="eyebrow">Limpiador de video</p>
+        <h1>Auto Video Cleaner</h1>
+      </div>
+    </div>
+  );
+}
+
+function TranscriptPanel({
+  transcript,
+  isLoading,
+  error,
+  jobStatus,
+  health,
+  selectedRange,
+  manualCuts,
+  playbackTime,
+  playbackSource,
+  isPlaybackActive,
+  isPlaybackRunning,
+  hasPendingCuts,
+  canUndo,
+  canRedo,
+  isBusy,
+  onWordPointerDown,
+  onWordPointerEnter,
+  onClearSelection,
+  onDeleteSelected,
+  onApplyCuts,
+  onUndo,
+  onRedo
+}: {
+  transcript: Transcript | null;
+  isLoading: boolean;
+  error: string | null;
+  jobStatus: JobStatus;
+  health: Health | null;
+  selectedRange: SelectionRange | null;
+  manualCuts: CutSegment[];
+  playbackTime: number | null;
+  playbackSource: PlaybackSource | null;
+  isPlaybackActive: boolean;
+  isPlaybackRunning: boolean;
+  hasPendingCuts: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+  isBusy: boolean;
+  onWordPointerDown: (index: number) => void;
+  onWordPointerEnter: (index: number) => void;
+  onClearSelection: () => void;
+  onDeleteSelected: () => void;
+  onApplyCuts: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
+}) {
+  const words = transcript?.words ?? [];
+  const blocks = buildTranscriptBlocks(words);
+  const activeWordRef = useRef<HTMLButtonElement | null>(null);
+  const selectedBounds = selectedRange ? normalizeRange(selectedRange) : null;
+  const selectedWords = selectedBounds
+    ? words.slice(selectedBounds[0], selectedBounds[1] + 1).filter((word) => !isWordDeleted(word, manualCuts))
+    : [];
+  const deletedWordCount = words.filter((word) => isWordDeleted(word, manualCuts)).length;
+  const pendingCutSeconds = mergeCutRanges(manualCuts).reduce((total, cut) => total + Math.max(0, cut.end - cut.start), 0);
+  const selectedStart = selectedWords[0]?.start;
+  const selectedEnd = selectedWords[selectedWords.length - 1]?.end;
+  const hasWords = words.length > 0;
+  const notes = transcript?.notes ?? [];
+  const activeWordIndex = getActiveTranscriptWordIndex(words, playbackTime);
+  const playbackLabel = playbackSource === "after" ? "Despues" : playbackSource === "before" ? "Antes" : null;
+  const emptyCopy =
+    error ??
+    (health?.dialogue_cleanup === false
+      ? "Whisper no esta instalado en este entorno."
+      : jobStatus === "completed"
+        ? "No hay transcripcion para mostrar."
+        : "Pendiente de procesar.");
+
+  function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    const key = event.key.toLowerCase();
+    if ((key === "delete" || key === "backspace") && selectedWords.length && !isBusy) {
+      event.preventDefault();
+      onDeleteSelected();
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && key === "z" && !isBusy) {
+      event.preventDefault();
+      if (event.shiftKey) {
+        if (canRedo) onRedo();
+      } else if (canUndo) {
+        onUndo();
+      }
+      return;
+    }
+    if (key === "escape") {
+      onClearSelection();
+    }
+  }
+
+  useEffect(() => {
+    if (!isPlaybackRunning || activeWordIndex < 0) return;
+    activeWordRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [activeWordIndex, isPlaybackRunning]);
+
+  return (
+    <div className="transcript-panel">
+      <div className="transcript-header">
+        <div className="panel-title">
+          <FileText size={17} />
+          <h2>Transcripcion</h2>
+        </div>
+        <div className="transcript-actions" aria-label="Acciones de transcripcion">
+          <button className="tool-button" type="button" onClick={onUndo} disabled={!canUndo || isBusy} title="Deshacer">
+            <Undo2 size={16} />
+          </button>
+          <button className="tool-button" type="button" onClick={onRedo} disabled={!canRedo || isBusy} title="Rehacer">
+            <Redo2 size={16} />
+          </button>
+          <button
+            className="tool-button danger-tool"
+            type="button"
+            onClick={onDeleteSelected}
+            disabled={!selectedWords.length || isBusy}
+            title="Eliminar seleccion"
+          >
+            <Trash2 size={16} />
+            <span>Eliminar</span>
+          </button>
+          <button
+            className="tool-button apply-tool"
+            type="button"
+            onClick={onApplyCuts}
+            disabled={!hasPendingCuts || isBusy}
+            title="Aplicar cortes al video"
+          >
+            {isBusy ? <LoaderCircle className="spin" size={16} /> : <Scissors size={16} />}
+            <span>Aplicar cortes</span>
+          </button>
+        </div>
+      </div>
+
+      <div className="transcript-meta">
+        <span>{hasWords ? `${words.length} palabras` : isLoading ? "Transcribiendo" : emptyCopy}</span>
+        {playbackLabel && playbackTime !== null && <span>Karaoke {playbackLabel}: {formatSeconds(playbackTime)}</span>}
+        {deletedWordCount > 0 && <span>{deletedWordCount} borradas</span>}
+        {deletedWordCount > 0 && <span>{formatSeconds(pendingCutSeconds)} marcado</span>}
+        {hasPendingCuts && <span>Pendiente de aplicar</span>}
+        {selectedWords.length > 0 && selectedStart !== undefined && selectedEnd !== undefined && (
+          <span>
+            {selectedWords.length} seleccionadas · {formatSeconds(selectedStart)} - {formatSeconds(selectedEnd)}
+          </span>
+        )}
+      </div>
+
+      <div
+        className="transcript-surface"
+        aria-label="Transcripcion"
+        aria-readonly="true"
+        tabIndex={0}
+        onKeyDown={handleKeyDown}
+      >
+        {isLoading && !hasWords ? (
+          <div className="transcript-empty">
+            <LoaderCircle className="spin" size={22} />
+            <span>Transcribiendo</span>
+          </div>
+        ) : hasWords ? (
+          blocks.map((block) => (
+            <div
+              className={`dialogue-row ${block.gapBefore >= 1.2 ? "has-paragraph-gap" : ""} ${
+                block.words.some(({ index }) => index === activeWordIndex) ? "is-current-line" : ""
+              }`}
+              key={block.id}
+            >
+              <time className="dialogue-time">{formatSeconds(block.start)}</time>
+              <p className="dialogue-text">
+                {block.words.map(({ word, index }) => {
+                  const isSelected = selectedBounds ? index >= selectedBounds[0] && index <= selectedBounds[1] : false;
+                  const isDeleted = isWordDeleted(word, manualCuts);
+                  const isCurrent = isPlaybackActive && activeWordIndex === index && !isDeleted;
+                  const isPlayed = playbackTime !== null && word.end < playbackTime && !isDeleted;
+                  const wordStyle = isCurrent
+                    ? ({ "--word-progress": `${getWordProgressPercent(word, playbackTime)}%` } as CSSProperties)
+                    : undefined;
+                  return (
+                    <span className="transcript-token" key={`${word.start}-${word.end}-${index}`}>
+                      <button
+                        ref={isCurrent ? activeWordRef : undefined}
+                        className={`transcript-word ${isPlayed ? "is-played" : ""} ${isCurrent ? "is-current" : ""} ${
+                          isSelected ? "is-selected" : ""
+                        } ${isDeleted ? "is-deleted" : ""}`}
+                        type="button"
+                        disabled={isDeleted || isBusy}
+                        aria-pressed={isSelected}
+                        title={`${formatSeconds(word.start)} - ${formatSeconds(word.end)}`}
+                        style={wordStyle}
+                        onPointerDown={(event) => {
+                          event.preventDefault();
+                          onWordPointerDown(index);
+                        }}
+                        onPointerEnter={() => onWordPointerEnter(index)}
+                      >
+                        {word.text}
+                      </button>{" "}
+                    </span>
+                  );
+                })}
+              </p>
+            </div>
+          ))
+        ) : (
+          <p className="muted">{emptyCopy}</p>
+        )}
+      </div>
+
+      {notes.map((note) => (
+        <p className="ai-note" key={note}>
+          {note}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function VideoPanel({
+  title,
+  src,
+  emptyText,
+  playbackSource,
+  onPlaybackChange
+}: {
+  title: string;
+  src?: string | null;
+  emptyText: string;
+  playbackSource: PlaybackSource;
+  onPlaybackChange: (source: PlaybackSource, currentTime: number, isPlaying: boolean) => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const frameRef = useRef<number | null>(null);
+  const lastReportRef = useRef(0);
+
+  useEffect(() => stopPlaybackLoop, []);
+
+  function stopPlaybackLoop() {
+    if (frameRef.current === null) return;
+    window.cancelAnimationFrame(frameRef.current);
+    frameRef.current = null;
+  }
+
+  function reportPlayback(video: HTMLVideoElement, isPlaying: boolean) {
+    onPlaybackChange(playbackSource, video.currentTime, isPlaying);
+  }
+
+  function startPlaybackLoop(video: HTMLVideoElement) {
+    stopPlaybackLoop();
+    reportPlayback(video, true);
+    lastReportRef.current = 0;
+
+    const tick = (timestamp: number) => {
+      const currentVideo = videoRef.current;
+      if (!currentVideo || currentVideo.paused || currentVideo.ended) {
+        stopPlaybackLoop();
+        return;
+      }
+
+      if (timestamp - lastReportRef.current >= 80) {
+        reportPlayback(currentVideo, true);
+        lastReportRef.current = timestamp;
+      }
+
+      frameRef.current = window.requestAnimationFrame(tick);
+    };
+
+    frameRef.current = window.requestAnimationFrame(tick);
+  }
+
   return (
     <div className="video-panel">
       <div className="video-panel-header">
@@ -707,7 +1249,24 @@ function VideoPanel({ title, src, emptyText }: { title: string; src?: string | n
       </div>
       <div className="video-stage">
         {src ? (
-          <video className="preview-video" src={src} controls playsInline />
+          <video
+            ref={videoRef}
+            className="preview-video"
+            src={src}
+            controls
+            playsInline
+            onPlay={(event) => startPlaybackLoop(event.currentTarget)}
+            onTimeUpdate={(event) => reportPlayback(event.currentTarget, !event.currentTarget.paused)}
+            onPause={(event) => {
+              stopPlaybackLoop();
+              reportPlayback(event.currentTarget, false);
+            }}
+            onEnded={(event) => {
+              stopPlaybackLoop();
+              reportPlayback(event.currentTarget, false);
+            }}
+            onSeeked={(event) => reportPlayback(event.currentTarget, !event.currentTarget.paused)}
+          />
         ) : (
           <div className="empty-preview">
             <FileVideo size={38} />
@@ -783,6 +1342,18 @@ async function fetchJob(jobId: string): Promise<Job> {
   return parseResponse<Job>(response);
 }
 
+async function fetchTranscript(jobId: string): Promise<Transcript> {
+  const response = await fetch(apiUrl(`/api/jobs/${jobId}/transcript`));
+  return parseResponse<Transcript>(response);
+}
+
+async function startTranscript(jobId: string): Promise<void> {
+  const response = await fetch(apiUrl(`/api/jobs/${jobId}/transcribe`), {
+    method: "POST"
+  });
+  await parseResponse<{ status: string }>(response);
+}
+
 async function parseResponse<T>(response: Response): Promise<T> {
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
@@ -818,6 +1389,107 @@ function downloadBlob(blob: Blob, filename: string) {
   anchor.click();
   anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function toEditableCutPayload(cuts: CutSegment[]) {
+  return cuts.map((cut) => ({
+    start: cut.start,
+    end: cut.end,
+    reason: cut.reason
+  }));
+}
+
+function buildTranscriptBlocks(words: TranscriptWord[]): TranscriptBlock[] {
+  const blocks: TranscriptBlock[] = [];
+  let current: TranscriptBlock | null = null;
+
+  words.forEach((word, index) => {
+    const previous = words[index - 1];
+    const gapBefore = previous ? Math.max(0, word.start - previous.end) : 0;
+    const currentLength = current?.words.length ?? 0;
+    const sentenceBreak = previous ? /[.!?]$/.test(previous.text.trim()) : false;
+    const shouldStartBlock =
+      !current || gapBefore >= 0.65 || (gapBefore >= 0.28 && currentLength >= 16) || (sentenceBreak && currentLength >= 9);
+
+    if (shouldStartBlock) {
+      current = {
+        id: `${word.start}-${index}`,
+        start: word.start,
+        end: word.end,
+        gapBefore,
+        words: []
+      };
+      blocks.push(current);
+    }
+
+    current!.words.push({ word, index });
+    current!.end = word.end;
+  });
+
+  return blocks;
+}
+
+function normalizeRange(range: SelectionRange): [number, number] {
+  return [Math.min(range.anchor, range.focus), Math.max(range.anchor, range.focus)];
+}
+
+function isWordDeleted(word: TranscriptWord | undefined, cuts: CutSegment[]) {
+  if (!word) return false;
+  return cuts.some((cut) => word.start < cut.end && word.end > cut.start);
+}
+
+function getActiveTranscriptWordIndex(words: TranscriptWord[], playbackTime: number | null) {
+  if (playbackTime === null) return -1;
+  return words.findIndex((word) => playbackTime >= word.start && playbackTime <= word.end);
+}
+
+function getWordProgressPercent(word: TranscriptWord, playbackTime: number | null) {
+  if (playbackTime === null) return 0;
+  const duration = Math.max(0.05, word.end - word.start);
+  return clampNumber(((playbackTime - word.start) / duration) * 100, 0, 100);
+}
+
+function mapRenderedTimeToOriginal(renderedTime: number, cuts: CutSegment[], sourceDuration?: number) {
+  const safeRenderedTime = Math.max(0, Number.isFinite(renderedTime) ? renderedTime : 0);
+  const originalTime = mergeCutRanges(cuts).reduce((time, cut) => {
+    if (time < cut.start) return time;
+    return time + Math.max(0, cut.end - cut.start);
+  }, safeRenderedTime);
+
+  return sourceDuration && sourceDuration > 0 ? clampNumber(originalTime, 0, sourceDuration) : originalTime;
+}
+
+function mergeCutRanges(cuts: CutSegment[]) {
+  const sorted = [...cuts].sort((left, right) => left.start - right.start);
+  const merged: Array<Pick<CutSegment, "start" | "end">> = [];
+
+  sorted.forEach((cut) => {
+    const last = merged[merged.length - 1];
+    if (last && cut.start <= last.end) {
+      last.end = Math.max(last.end, cut.end);
+      return;
+    }
+    merged.push({ start: cut.start, end: cut.end });
+  });
+
+  return merged;
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function areCutListsEqual(left: CutSegment[], right: CutSegment[]) {
+  if (left.length !== right.length) return false;
+  return left.every((cut, index) => {
+    const other = right[index];
+    return (
+      Boolean(other) &&
+      Math.abs(cut.start - other.start) < 0.001 &&
+      Math.abs(cut.end - other.end) < 0.001 &&
+      cut.reason === other.reason
+    );
+  });
 }
 
 function getCleanupMode(settings: Settings) {
