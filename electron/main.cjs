@@ -87,6 +87,7 @@ function appIconPath() {
 }
 
 async function startBackend(port) {
+  const bundledBinPath = backendBinPath();
   const env = {
     ...process.env,
     AUTO_VIDEO_CLEANER_DESKTOP: "1",
@@ -95,7 +96,9 @@ async function startBackend(port) {
     AUTO_VIDEO_CLEANER_CLIENT_DIR: app.isPackaged
       ? path.join(process.resourcesPath, "client")
       : path.join(app.getAppPath(), "client", "dist"),
-    PATH: buildBackendPath()
+    AUTO_VIDEO_CLEANER_FFMPEG_PATH: path.join(bundledBinPath, process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg"),
+    AUTO_VIDEO_CLEANER_FFPROBE_PATH: path.join(bundledBinPath, process.platform === "win32" ? "ffprobe.exe" : "ffprobe"),
+    PATH: buildBackendPath(bundledBinPath)
   };
 
   const command = isDev ? devPythonPath() : packagedServerPath();
@@ -148,8 +151,11 @@ function devPythonPath() {
   return path.join(app.getAppPath(), "server", ".venv", process.platform === "win32" ? "Scripts" : "bin", executable);
 }
 
-function buildBackendPath() {
-  const bundledBinPath = app.isPackaged ? path.join(process.resourcesPath, "bin") : path.join(app.getAppPath(), "native", "bin");
+function backendBinPath() {
+  return app.isPackaged ? path.join(process.resourcesPath, "bin") : path.join(app.getAppPath(), "native", "bin");
+}
+
+function buildBackendPath(bundledBinPath = backendBinPath()) {
   return [bundledBinPath, process.env.PATH ?? ""].filter(Boolean).join(path.delimiter);
 }
 

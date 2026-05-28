@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from importlib.util import find_spec
@@ -20,6 +19,8 @@ from .ai_cleanup import transcribe_dialogue
 from .processor import (
     ProcessingError,
     export_video,
+    ffmpeg_binary,
+    ffprobe_binary,
     probe_duration,
     process_video,
     render_text_edits,
@@ -71,8 +72,8 @@ def desktop_index() -> FileResponse:
 def health() -> dict[str, Union[str, bool]]:
     return {
         "ok": True,
-        "ffmpeg": shutil.which("ffmpeg") is not None,
-        "ffprobe": shutil.which("ffprobe") is not None,
+        "ffmpeg": ffmpeg_binary() is not None,
+        "ffprobe": ffprobe_binary() is not None,
         "dialogue_cleanup": find_spec("faster_whisper") is not None,
     }
 

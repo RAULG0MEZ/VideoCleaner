@@ -964,13 +964,43 @@ function AppBrand({ centered = false }: { centered?: boolean }) {
   return (
     <div className={`app-brand ${centered ? "is-centered" : ""}`}>
       <span className="app-logo" aria-hidden="true">
-        <img src="/app-icon.svg?v=mic-clean-v3" alt="" />
+        <AppLogoIcon />
       </span>
       <div>
         <p className="eyebrow">Limpiador de video</p>
         <h1>Auto Video Cleaner</h1>
       </div>
     </div>
+  );
+}
+
+function AppLogoIcon() {
+  return (
+    <svg viewBox="0 0 64 64" role="img" aria-label="Auto Video Cleaner">
+      <defs>
+        <linearGradient id="appLogoBg" x1="14" x2="50" y1="8" y2="56" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#82f0d5" />
+          <stop offset=".54" stopColor="#67c2ac" />
+          <stop offset="1" stopColor="#d1a84e" />
+        </linearGradient>
+      </defs>
+      <rect x="6" y="6" width="52" height="52" rx="12" fill="url(#appLogoBg)" />
+      <path
+        d="M32 38c4.1 0 7-3 7-7.2V20.2C39 16 36.1 13 32 13s-7 3-7 7.2v10.6c0 4.2 2.9 7.2 7 7.2Z"
+        fill="none"
+        stroke="#07110f"
+        strokeLinecap="round"
+        strokeWidth="4"
+      />
+      <path
+        d="M19.5 29.5c0 7.2 5 12.4 12.5 12.4s12.5-5.2 12.5-12.4M32 42v8M26.5 50h11"
+        fill="none"
+        stroke="#07110f"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="4"
+      />
+    </svg>
   );
 }
 

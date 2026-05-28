@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -20,6 +21,8 @@ ProgressCallback = Callable[[float, str], None]
 CUTS_FILENAME = "cuts.json"
 BASE_CUTS_FILENAME = "base_cuts.json"
 TEXT_CUTS_FILENAME = "text_cuts.json"
+FFMPEG_ENV = "AUTO_VIDEO_CLEANER_FFMPEG_PATH"
+FFPROBE_ENV = "AUTO_VIDEO_CLEANER_FFPROBE_PATH"
 
 
 def process_video(
@@ -155,7 +158,7 @@ def _copy_mov_export(work_dir: Path, source: Path) -> Path:
         return target
 
     command = [
-        "ffmpeg",
+        ffmpeg_command(),
         "-y",
         "-hide_banner",
         "-loglevel",
@@ -173,13 +176,44 @@ def _copy_mov_export(work_dir: Path, source: Path) -> Path:
 
 
 def require_ffmpeg() -> None:
-    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+    if ffmpeg_binary() is None or ffprobe_binary() is None:
         raise ProcessingError("FFmpeg no esta instalado o no esta en PATH.")
+
+
+def ffmpeg_binary() -> Optional[str]:
+    return _resolve_binary(FFMPEG_ENV, "ffmpeg")
+
+
+def ffprobe_binary() -> Optional[str]:
+    return _resolve_binary(FFPROBE_ENV, "ffprobe")
+
+
+def ffmpeg_command() -> str:
+    command = ffmpeg_binary()
+    if command is None:
+        raise ProcessingError("FFmpeg no esta instalado o no esta en PATH.")
+    return command
+
+
+def ffprobe_command() -> str:
+    command = ffprobe_binary()
+    if command is None:
+        raise ProcessingError("FFmpeg no esta instalado o no esta en PATH.")
+    return command
+
+
+def _resolve_binary(env_name: str, fallback_name: str) -> Optional[str]:
+    configured = os.getenv(env_name)
+    if configured:
+        path = Path(configured).expanduser()
+        if path.is_file():
+            return str(path)
+    return shutil.which(fallback_name)
 
 
 def probe_duration(input_path: Path) -> float:
     command = [
-        "ffprobe",
+        ffprobe_command(),
         "-v",
         "error",
         "-show_entries",
@@ -197,7 +231,7 @@ def probe_duration(input_path: Path) -> float:
 
 def probe_has_audio(input_path: Path) -> bool:
     command = [
-        "ffprobe",
+        ffprobe_command(),
         "-v",
         "error",
         "-select_streams",
@@ -214,7 +248,7 @@ def probe_has_audio(input_path: Path) -> bool:
 
 def detect_silence_cuts(input_path: Path, duration: float, settings: CleanerSettings) -> list[CutSegment]:
     command = [
-        "ffmpeg",
+        ffmpeg_command(),
         "-hide_banner",
         "-nostats",
         "-i",
@@ -256,7 +290,7 @@ def render_clean_video(
     filter_path.write_text(_build_concat_filter(keep_segments), encoding="utf-8")
 
     command = [
-        "ffmpeg",
+        ffmpeg_command(),
         "-y",
         "-hide_banner",
         "-loglevel",
