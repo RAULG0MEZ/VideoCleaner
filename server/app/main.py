@@ -8,6 +8,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from importlib.util import find_spec
 from pathlib import Path
+from threading import Lock
 from typing import Annotated, Optional, Union
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -15,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from .ai_cleanup import transcribe_dialogue
 from .processor import (
     ProcessingError,
     export_video,
@@ -48,6 +50,8 @@ app.add_middleware(
 
 store = JobStore()
 executor = ThreadPoolExecutor(max_workers=2)
+transcription_lock = Lock()
+transcription_jobs: set[str] = set()
 
 if IS_DESKTOP and CLIENT_DIR.exists():
     assets_dir = CLIENT_DIR / "assets"
@@ -114,6 +118,7 @@ def process_job(
     enable_transcription: Annotated[bool, Form()] = True,
     enable_ai_cleanup: Annotated[bool, Form()] = False,
     language: Annotated[str, Form()] = "es",
+    text_cuts: Annotated[Optional[str], Form()] = None,
 ) -> dict:
     job = store.get(job_id)
     if job is None:
@@ -136,6 +141,12 @@ def process_job(
         language=language,
     ).normalized()
 
+    preserved_text_cuts = (
+        _parse_text_cuts_form(text_cuts)
+        if text_cuts is not None
+        else _read_cut_segments(work_dir / "text_cuts.json")
+    )
+
     _cleanup_previous_outputs(work_dir)
     next_job = store.update(
         job_id,
@@ -149,7 +160,7 @@ def process_job(
         ai_notes=[],
         error=None,
     )
-    executor.submit(_run_job, job_id, input_path, work_dir, settings)
+    executor.submit(_run_job, job_id, input_path, work_dir, settings, preserved_text_cuts)
     return next_job.to_dict()
 
 
@@ -177,9 +188,40 @@ def transcript(job_id: str) -> dict:
     return payload
 
 
+@app.post("/api/jobs/{job_id}/transcribe")
+def transcribe_job(job_id: str) -> dict:
+    job, work_dir = _existing_job(job_id)
+    transcript_path = work_dir / "transcript.json"
+    if transcript_path.exists():
+        return {"status": "completed"}
+
+    input_path = _source_path(work_dir)
+    if input_path is None:
+        raise HTTPException(status_code=404, detail="No encontre el archivo fuente de este job.")
+
+    with transcription_lock:
+        if job_id in transcription_jobs:
+            return {"status": "transcribing"}
+        transcription_jobs.add(job_id)
+
+    settings = CleanerSettings(
+        silence_threshold_db=job.settings.silence_threshold_db,
+        min_silence_sec=job.settings.min_silence_sec,
+        keep_silence_sec=job.settings.keep_silence_sec,
+        crf=job.settings.crf,
+        enable_transcription=True,
+        enable_ai_cleanup=False,
+        language=job.settings.language,
+    ).normalized()
+    executor.submit(_run_transcription_job, job_id, input_path, work_dir, settings)
+    return {"status": "transcribing"}
+
+
 @app.post("/api/jobs/{job_id}/text-edits")
 def apply_text_edits(job_id: str, payload: dict) -> dict:
-    job, work_dir = _completed_job(job_id)
+    job, work_dir = _existing_job(job_id)
+    if job.status in {"queued", "analyzing", "rendering"}:
+        raise HTTPException(status_code=409, detail="Espera a que termine el proceso actual.")
     manual_cuts = _parse_cut_payload(payload, "Manda una lista de cortes por texto.")
     input_path = _source_path(work_dir)
     if input_path is None:
@@ -246,13 +288,25 @@ def download(job_id: str, format: str = "mp4") -> FileResponse:
     return FileResponse(path, media_type=media_type, filename=f"{Path(job.filename).stem}-cleaned.{fmt}")
 
 
-def _run_job(job_id: str, input_path: Path, work_dir: Path, settings: CleanerSettings) -> None:
+def _run_job(
+    job_id: str,
+    input_path: Path,
+    work_dir: Path,
+    settings: CleanerSettings,
+    text_cuts: Optional[list[CutSegment]],
+) -> None:
     def progress(value: float, message: str) -> None:
         store.update(job_id, progress=round(value, 3), message=message)
 
     try:
         store.update(job_id, status="analyzing", progress=0.02, message="Preparando analisis")
-        duration, cleaned_duration, cuts, ai_notes, _output_path = process_video(input_path, work_dir, settings, progress)
+        duration, cleaned_duration, cuts, ai_notes, _output_path = process_video(
+            input_path,
+            work_dir,
+            settings,
+            progress,
+            text_cuts=text_cuts,
+        )
         store.update(
             job_id,
             status="completed",
@@ -267,6 +321,30 @@ def _run_job(job_id: str, input_path: Path, work_dir: Path, settings: CleanerSet
     except Exception as exc:
         message = str(exc) if str(exc) else "Error desconocido procesando el video."
         store.update(job_id, status="failed", progress=1.0, message=message, error=message)
+
+
+def _run_transcription_job(job_id: str, input_path: Path, work_dir: Path, settings: CleanerSettings) -> None:
+    try:
+        transcribe_dialogue(input_path, work_dir, settings)
+    except Exception as exc:
+        message = str(exc) if str(exc) else "No pude transcribir el video."
+        (work_dir / "transcript.json").write_text(
+            json.dumps(
+                {
+                    "available": False,
+                    "language": settings.language,
+                    "duration": None,
+                    "notes": [message],
+                    "words": [],
+                },
+                ensure_ascii=True,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    finally:
+        with transcription_lock:
+            transcription_jobs.discard(job_id)
 
 
 def _run_text_edit_job(
@@ -409,6 +487,37 @@ def _parse_cut_payload(payload: dict, missing_message: str) -> list[CutSegment]:
             raise HTTPException(status_code=400, detail="Los cortes por texto necesitan tiempos validos.")
         reason = str(raw_cut.get("reason") or "Texto eliminado")[:160]
         cuts.append(CutSegment(start=start, end=end, reason=reason))
+    return cuts
+
+
+def _parse_text_cuts_form(raw_cuts: str) -> list[CutSegment]:
+    raw_cuts = raw_cuts.strip()
+    if not raw_cuts:
+        return []
+
+    try:
+        payload = json.loads(raw_cuts)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Los cortes por texto no tienen JSON valido.") from exc
+    return _parse_cut_payload({"cuts": payload}, "Manda una lista de cortes por texto.")
+
+
+def _read_cut_segments(path: Path) -> Optional[list[CutSegment]]:
+    if not path.exists():
+        return None
+
+    cuts: list[CutSegment] = []
+    for raw_cut in _read_cut_payload(path):
+        if not isinstance(raw_cut, dict):
+            continue
+        try:
+            start = float(raw_cut["start"])
+            end = float(raw_cut["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if start < 0 or end <= start:
+            continue
+        cuts.append(CutSegment(start=start, end=end, reason=str(raw_cut.get("reason") or "Texto eliminado")[:160]))
     return cuts
 
 

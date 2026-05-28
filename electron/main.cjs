@@ -1,5 +1,6 @@
-const { app, BrowserWindow, dialog } = require("electron");
+const { app, BrowserWindow, dialog, nativeImage } = require("electron");
 const { spawn } = require("node:child_process");
+const { existsSync } = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
 const path = require("node:path");
@@ -40,6 +41,11 @@ app.on("before-quit", () => {
 });
 
 async function createWindow(port) {
+  const iconPath = appIconPath();
+  if (process.platform === "darwin" && iconPath) {
+    app.dock?.setIcon(nativeImage.createFromPath(iconPath));
+  }
+
   mainWindow = new BrowserWindow({
     width: 1360,
     height: 920,
@@ -47,6 +53,7 @@ async function createWindow(port) {
     minHeight: 760,
     title: "Auto Video Cleaner",
     backgroundColor: "#0b0f14",
+    icon: iconPath,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -68,6 +75,15 @@ async function createWindow(port) {
   }
 
   await mainWindow.loadURL(apiBaseUrl);
+}
+
+function appIconPath() {
+  const candidates = [
+    path.join(app.getAppPath(), "build", "icon.png"),
+    path.join(process.resourcesPath, "build", "icon.png"),
+    path.join(process.resourcesPath, "icon.png")
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? undefined;
 }
 
 async function startBackend(port) {
