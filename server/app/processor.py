@@ -20,6 +20,8 @@ ProgressCallback = Callable[[float, str], None]
 CUTS_FILENAME = "cuts.json"
 BASE_CUTS_FILENAME = "base_cuts.json"
 TEXT_CUTS_FILENAME = "text_cuts.json"
+NON_MEDIA_INPUT_OPTIONS = ["-sn", "-dn"]
+AUDIO_ONLY_INPUT_OPTIONS = ["-vn", *NON_MEDIA_INPUT_OPTIONS]
 
 
 def process_video(
@@ -213,18 +215,7 @@ def probe_has_audio(input_path: Path) -> bool:
 
 
 def detect_silence_cuts(input_path: Path, duration: float, settings: CleanerSettings) -> list[CutSegment]:
-    command = [
-        "ffmpeg",
-        "-hide_banner",
-        "-nostats",
-        "-i",
-        str(input_path),
-        "-af",
-        f"silencedetect=noise={settings.silence_threshold_db}dB:d={settings.min_silence_sec}",
-        "-f",
-        "null",
-        "-",
-    ]
+    command = _build_silence_detect_command(input_path, settings)
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise ProcessingError(_clean_error(result.stderr) or "Fallo el analisis de silencios.")
@@ -255,36 +246,7 @@ def render_clean_video(
     filter_path = output_path.with_suffix(".filter")
     filter_path.write_text(_build_concat_filter(keep_segments), encoding="utf-8")
 
-    command = [
-        "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-progress",
-        "pipe:1",
-        "-i",
-        str(input_path),
-        "-filter_complex_script",
-        str(filter_path),
-        "-map",
-        "[outv]",
-        "-map",
-        "[outa]",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        str(settings.crf),
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-movflags",
-        "+faststart",
-        str(output_path),
-    ]
+    command = _build_render_command(input_path, output_path, filter_path, settings)
 
     process = subprocess.Popen(
         command,
@@ -348,12 +310,70 @@ def _build_concat_filter(segments: list[tuple[float, float]]) -> str:
     labels: list[str] = []
     for index, (start, end) in enumerate(segments):
         filters.append(
-            f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS[v{index}];"
-            f"[0:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[a{index}];"
+            f"[0:v:0]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS[v{index}];"
+            f"[0:a:0]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[a{index}];"
         )
         labels.append(f"[v{index}][a{index}]")
     filters.append("".join(labels) + f"concat=n={len(segments)}:v=1:a=1[outv][outa]")
     return "\n".join(filters)
+
+
+def _build_silence_detect_command(input_path: Path, settings: CleanerSettings) -> list[str]:
+    return [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostats",
+        # Phone and screen-recorder files often include data/timecode streams.
+        # Older Windows FFmpeg builds can try to decode them as "codec none".
+        *AUDIO_ONLY_INPUT_OPTIONS,
+        "-i",
+        str(input_path),
+        "-map",
+        "0:a:0",
+        "-af",
+        f"silencedetect=noise={settings.silence_threshold_db}dB:d={settings.min_silence_sec}",
+        "-f",
+        "null",
+        "-",
+    ]
+
+
+def _build_render_command(input_path: Path, output_path: Path, filter_path: Path, settings: CleanerSettings) -> list[str]:
+    return [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-progress",
+        "pipe:1",
+        *NON_MEDIA_INPUT_OPTIONS,
+        "-i",
+        str(input_path),
+        "-filter_complex_script",
+        str(filter_path),
+        "-map",
+        "[outv]",
+        "-map",
+        "[outa]",
+        "-map_metadata",
+        "-1",
+        "-map_chapters",
+        "-1",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        str(settings.crf),
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
 
 
 def _parse_silencedetect(stderr: str, duration: float) -> list[tuple[float, float]]:
