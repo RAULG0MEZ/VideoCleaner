@@ -67,11 +67,7 @@ async function createWindow(port) {
     return;
   }
 
-  await mainWindow.loadFile(path.join(__dirname, "..", "client", "dist", "index.html"), {
-    query: {
-      apiBaseUrl
-    }
-  });
+  await mainWindow.loadURL(apiBaseUrl);
 }
 
 async function startBackend(port) {
@@ -80,6 +76,9 @@ async function startBackend(port) {
     AUTO_VIDEO_CLEANER_DESKTOP: "1",
     AUTO_VIDEO_CLEANER_PORT: String(port),
     AUTO_VIDEO_CLEANER_DATA_DIR: path.join(app.getPath("userData"), "jobs"),
+    AUTO_VIDEO_CLEANER_CLIENT_DIR: app.isPackaged
+      ? path.join(process.resourcesPath, "client")
+      : path.join(app.getAppPath(), "client", "dist"),
     PATH: buildBackendPath()
   };
 

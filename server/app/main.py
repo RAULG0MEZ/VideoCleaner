@@ -13,6 +13,7 @@ from typing import Annotated, Optional, Union
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from .processor import (
     ProcessingError,
@@ -30,6 +31,7 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.getenv("AUTO_VIDEO_CLEANER_DATA_DIR", BASE_DIR / "data" / "jobs")).expanduser()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 IS_DESKTOP = os.getenv("AUTO_VIDEO_CLEANER_DESKTOP") == "1"
+CLIENT_DIR = Path(os.getenv("AUTO_VIDEO_CLEANER_CLIENT_DIR", "")).expanduser()
 
 app = FastAPI(title="Auto Video Cleaner API", version="0.1.0")
 app.add_middleware(
@@ -46,6 +48,19 @@ app.add_middleware(
 
 store = JobStore()
 executor = ThreadPoolExecutor(max_workers=2)
+
+if IS_DESKTOP and CLIENT_DIR.exists():
+    assets_dir = CLIENT_DIR / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+
+@app.get("/", include_in_schema=False)
+def desktop_index() -> FileResponse:
+    index_path = CLIENT_DIR / "index.html"
+    if not IS_DESKTOP or not index_path.exists():
+        raise HTTPException(status_code=404, detail="Frontend no disponible.")
+    return FileResponse(index_path, media_type="text/html")
 
 
 @app.get("/api/health")

@@ -1,6 +1,6 @@
 {
   "name": "auto-video-cleaner",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -26,10 +26,16 @@
     },
     "files": [
       "electron/**/*",
-      "client/dist/**/*",
       "package.json"
     ],
     "extraResources": [
+      {
+        "from": "client/dist",
+        "to": "client",
+        "filter": [
+          "**/*"
+        ]
+      },
       {
         "from": "server/dist",
         "to": "server",
