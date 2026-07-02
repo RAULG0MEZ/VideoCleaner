@@ -118,6 +118,11 @@ type CleanupMode = {
 
 type ExportFormat = "mp4" | "mov";
 
+type KeyboardTransportAction =
+  | { type: "toggle-playback" }
+  | { type: "restart-playback" }
+  | { type: "seek-playback"; deltaSeconds: number };
+
 const initialSettings: Settings = {
   silenceThresholdDb: -35,
   minSilenceSec: 0.45,
@@ -130,6 +135,8 @@ const activeStatuses: JobStatus[] = ["queued", "analyzing", "rendering"];
 const maxQualityCrf = 12;
 const apiBaseUrl = getApiBaseUrl();
 const playbackSources: PlaybackSource[] = ["before", "after"];
+const normalKeyboardSeekSeconds = 1;
+const fastKeyboardSeekSeconds = 5;
 const textEntryInputTypes = new Set([
   "",
   "date",
@@ -336,12 +343,16 @@ export function App() {
     if (!job || isExportModalOpen) return;
 
     function handleEditorKeyDown(event: globalThis.KeyboardEvent) {
-      if (!isSpaceShortcut(event) || event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
-      if (shouldKeepSpaceForFocusedElement(event.target)) return;
+      if (event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
 
-      const didHandlePlayback = event.repeat
-        ? Boolean(getPreferredPlaybackVideo(event.target))
-        : toggleKeyboardPlayback(event.target);
+      const action = getKeyboardTransportAction(event);
+      if (!action) return;
+      if (shouldPreserveNativeKeyboardInput(event.target)) return;
+
+      const didHandlePlayback =
+        event.repeat && action.type === "toggle-playback"
+          ? Boolean(getPreferredPlaybackVideo(event.target))
+          : runKeyboardTransportAction(action, event.target);
       if (!didHandlePlayback) return;
 
       event.preventDefault();
@@ -490,6 +501,34 @@ export function App() {
 
     video.pause();
     return true;
+  }
+
+  function restartKeyboardPlayback(target: EventTarget | null) {
+    const preferredPlayback = getPreferredPlaybackVideo(target);
+    if (!preferredPlayback) return false;
+
+    const { source, video } = preferredPlayback;
+    video.currentTime = 0;
+    handleVideoPlayback(source, video.currentTime, !video.paused);
+    return true;
+  }
+
+  function seekKeyboardPlayback(target: EventTarget | null, deltaSeconds: number) {
+    const preferredPlayback = getPreferredPlaybackVideo(target);
+    if (!preferredPlayback) return false;
+
+    const { source, video } = preferredPlayback;
+    const maxTime = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : Number.MAX_SAFE_INTEGER;
+    const nextTime = clampNumber(video.currentTime + deltaSeconds, 0, maxTime);
+    video.currentTime = nextTime;
+    handleVideoPlayback(source, nextTime, !video.paused);
+    return true;
+  }
+
+  function runKeyboardTransportAction(action: KeyboardTransportAction, target: EventTarget | null) {
+    if (action.type === "toggle-playback") return toggleKeyboardPlayback(target);
+    if (action.type === "restart-playback") return restartKeyboardPlayback(target);
+    return seekKeyboardPlayback(target, action.deltaSeconds);
   }
 
   function getPreferredPlaybackVideo(target: EventTarget | null) {
@@ -1431,11 +1470,18 @@ function Slider({
   );
 }
 
-function isSpaceShortcut(event: globalThis.KeyboardEvent) {
-  return event.code === "Space" || event.key === " " || event.key === "Spacebar";
+function getKeyboardTransportAction(event: globalThis.KeyboardEvent): KeyboardTransportAction | null {
+  const key = event.key.toLowerCase();
+  if (event.code === "Space" || event.key === " " || event.key === "Spacebar") return { type: "toggle-playback" };
+  if (key === "enter") return { type: "restart-playback" };
+  if (key === "j") return { type: "seek-playback", deltaSeconds: -fastKeyboardSeekSeconds };
+  if (key === "l") return { type: "seek-playback", deltaSeconds: fastKeyboardSeekSeconds };
+  if (key === "arrowleft") return { type: "seek-playback", deltaSeconds: -normalKeyboardSeekSeconds };
+  if (key === "arrowright") return { type: "seek-playback", deltaSeconds: normalKeyboardSeekSeconds };
+  return null;
 }
 
-function shouldKeepSpaceForFocusedElement(target: EventTarget | null) {
+function shouldPreserveNativeKeyboardInput(target: EventTarget | null) {
   if (!(target instanceof Element)) return false;
 
   const contentEditableElement = target.closest("[contenteditable]");
