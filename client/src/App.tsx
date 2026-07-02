@@ -19,7 +19,8 @@ import {
   type CSSProperties,
   type ChangeEvent,
   type DragEvent,
-  type KeyboardEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  useCallback,
   useEffect,
   useId,
   useRef,
@@ -128,6 +129,22 @@ const initialSettings: Settings = {
 const activeStatuses: JobStatus[] = ["queued", "analyzing", "rendering"];
 const maxQualityCrf = 12;
 const apiBaseUrl = getApiBaseUrl();
+const playbackSources: PlaybackSource[] = ["before", "after"];
+const textEntryInputTypes = new Set([
+  "",
+  "date",
+  "datetime-local",
+  "email",
+  "month",
+  "number",
+  "password",
+  "search",
+  "tel",
+  "text",
+  "time",
+  "url",
+  "week"
+]);
 
 const cleanupModes: CleanupMode[] = [
   {
@@ -182,6 +199,10 @@ export function App() {
   const [exportProgress, setExportProgress] = useState(0);
   const [exportError, setExportError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const videoRefs = useRef<Record<PlaybackSource, HTMLVideoElement | null>>({
+    before: null,
+    after: null
+  });
 
   const isProcessing = job ? activeStatuses.includes(job.status) : false;
   const isBusy = isUploading || isProcessing;
@@ -205,6 +226,9 @@ export function App() {
       : job?.status === "failed"
         ? "Reintentar limpieza"
         : "Ejecutar limpieza";
+  const registerVideo = useCallback((source: PlaybackSource, video: HTMLVideoElement | null) => {
+    videoRefs.current[source] = video;
+  }, []);
 
   useEffect(() => {
     if (!job || !activeStatuses.includes(job.status)) return;
@@ -309,6 +333,26 @@ export function App() {
   }, [isSelectingTranscript]);
 
   useEffect(() => {
+    if (!job || isExportModalOpen) return;
+
+    function handleEditorKeyDown(event: globalThis.KeyboardEvent) {
+      if (!isSpaceShortcut(event) || event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
+      if (shouldKeepSpaceForFocusedElement(event.target)) return;
+
+      const didHandlePlayback = event.repeat
+        ? Boolean(getPreferredPlaybackVideo(event.target))
+        : toggleKeyboardPlayback(event.target);
+      if (!didHandlePlayback) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+    }
+
+    window.addEventListener("keydown", handleEditorKeyDown, { capture: true });
+    return () => window.removeEventListener("keydown", handleEditorKeyDown, { capture: true });
+  }, [job, isExportModalOpen, transcriptPlayback.source]);
+
+  useEffect(() => {
     if (!canExport) setIsExportModalOpen(false);
   }, [canExport]);
 
@@ -410,6 +454,8 @@ export function App() {
   }
 
   function handleVideoPlayback(source: PlaybackSource, currentTime: number, isPlaying: boolean) {
+    if (isPlaying) pauseOtherPlayback(source);
+
     const originalTime =
       source === "after"
         ? mapRenderedTimeToOriginal(currentTime, job?.cuts ?? [], job?.duration ?? transcript?.duration)
@@ -420,6 +466,57 @@ export function App() {
       originalTime,
       isPlaying
     });
+  }
+
+  function pauseOtherPlayback(source: PlaybackSource) {
+    playbackSources.forEach((otherSource) => {
+      if (otherSource === source) return;
+      const video = videoRefs.current[otherSource];
+      if (video && !video.paused) video.pause();
+    });
+  }
+
+  function toggleKeyboardPlayback(target: EventTarget | null) {
+    const preferredPlayback = getPreferredPlaybackVideo(target);
+    if (!preferredPlayback) return false;
+
+    const { source, video } = preferredPlayback;
+    if (video.paused || video.ended) {
+      pauseOtherPlayback(source);
+      if (video.ended) video.currentTime = 0;
+      void video.play().catch(() => undefined);
+      return true;
+    }
+
+    video.pause();
+    return true;
+  }
+
+  function getPreferredPlaybackVideo(target: EventTarget | null) {
+    const sourceFromTarget = getPlaybackSourceFromTarget(target);
+    if (sourceFromTarget) {
+      const video = videoRefs.current[sourceFromTarget];
+      if (isPlayableVideo(video)) return { source: sourceFromTarget, video };
+    }
+
+    if (transcriptPlayback.source) {
+      const video = videoRefs.current[transcriptPlayback.source];
+      if (isPlayableVideo(video)) return { source: transcriptPlayback.source, video };
+    }
+
+    const playingSource = playbackSources.find((source) => {
+      const video = videoRefs.current[source];
+      return isPlayableVideo(video) && !video.paused && !video.ended;
+    });
+    if (playingSource) return { source: playingSource, video: videoRefs.current[playingSource]! };
+
+    const afterVideo = videoRefs.current.after;
+    if (isPlayableVideo(afterVideo)) return { source: "after" as const, video: afterVideo };
+
+    const beforeVideo = videoRefs.current.before;
+    if (isPlayableVideo(beforeVideo)) return { source: "before" as const, video: beforeVideo };
+
+    return null;
   }
 
   function openExportModal() {
@@ -643,6 +740,7 @@ export function App() {
           src={beforeVideoUrl}
           emptyText={isUploading ? "Subiendo video" : "Sube un video para verlo aqui"}
           playbackSource="before"
+          onVideoMount={registerVideo}
           onPlaybackChange={handleVideoPlayback}
         />
         <VideoPanel
@@ -650,6 +748,7 @@ export function App() {
           src={afterVideoUrl}
           emptyText={isBusy ? "Procesando limpieza" : "Ejecuta limpieza para ver resultado"}
           playbackSource="after"
+          onVideoMount={registerVideo}
           onPlaybackChange={handleVideoPlayback}
         />
       </section>
@@ -1044,7 +1143,7 @@ function TranscriptPanel({
         ? "No hay transcripcion para mostrar."
         : "Pendiente de procesar.");
 
-  function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
     const key = event.key.toLowerCase();
     if ((key === "delete" || key === "backspace") && selectedWords.length && !isBusy) {
       event.preventDefault();
@@ -1195,12 +1294,14 @@ function VideoPanel({
   src,
   emptyText,
   playbackSource,
+  onVideoMount,
   onPlaybackChange
 }: {
   title: string;
   src?: string | null;
   emptyText: string;
   playbackSource: PlaybackSource;
+  onVideoMount: (source: PlaybackSource, video: HTMLVideoElement | null) => void;
   onPlaybackChange: (source: PlaybackSource, currentTime: number, isPlaying: boolean) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -1208,6 +1309,11 @@ function VideoPanel({
   const lastReportRef = useRef(0);
 
   useEffect(() => stopPlaybackLoop, []);
+
+  useEffect(() => {
+    onVideoMount(playbackSource, videoRef.current);
+    return () => onVideoMount(playbackSource, null);
+  }, [onVideoMount, playbackSource, src]);
 
   function stopPlaybackLoop() {
     if (frameRef.current === null) return;
@@ -1243,7 +1349,7 @@ function VideoPanel({
   }
 
   return (
-    <div className="video-panel">
+    <div className="video-panel" data-playback-source={playbackSource}>
       <div className="video-panel-header">
         <span>{title}</span>
       </div>
@@ -1323,6 +1429,43 @@ function Slider({
       <p className="slider-hint">{hint}</p>
     </div>
   );
+}
+
+function isSpaceShortcut(event: globalThis.KeyboardEvent) {
+  return event.code === "Space" || event.key === " " || event.key === "Spacebar";
+}
+
+function shouldKeepSpaceForFocusedElement(target: EventTarget | null) {
+  if (!(target instanceof Element)) return false;
+
+  const contentEditableElement = target.closest("[contenteditable]");
+  if (contentEditableElement instanceof HTMLElement && contentEditableElement.isContentEditable) return true;
+
+  const nativeSpaceElement = target.closest(
+    "input, textarea, select, [role='textbox'], [role='searchbox'], [role='combobox'], [data-editor-space='native']"
+  );
+  if (!nativeSpaceElement) return false;
+
+  if (nativeSpaceElement instanceof HTMLTextAreaElement || nativeSpaceElement instanceof HTMLSelectElement) return true;
+  if (nativeSpaceElement instanceof HTMLInputElement) {
+    return textEntryInputTypes.has(nativeSpaceElement.type.toLowerCase());
+  }
+
+  return true;
+}
+
+function getPlaybackSourceFromTarget(target: EventTarget | null): PlaybackSource | null {
+  if (!(target instanceof Element)) return null;
+
+  const sourceElement = target.closest("[data-playback-source]");
+  if (!(sourceElement instanceof HTMLElement)) return null;
+
+  const source = sourceElement.dataset.playbackSource;
+  return source === "before" || source === "after" ? source : null;
+}
+
+function isPlayableVideo(video: HTMLVideoElement | null): video is HTMLVideoElement {
+  return Boolean(video && (video.currentSrc || video.src));
 }
 
 function getApiBaseUrl() {
